@@ -11,6 +11,10 @@ requirement; changing either creates stale or duplicate permission entries.
   launch it with `./run.sh`. The script normalizes an ad hoc build's designated
   requirement before launch. Do not rebuild or re-sign it after granting Screen
   Recording during a test session.
+- On this Mac, the Debug apps are installed as `/Applications/OpenDisplay.app`
+  and `/Applications/OpenDisplay Receiver.app`, without "Dev". To install a
+  new build, copy its `Contents/MacOS` into the installed app, then re-sign
+  with the stable requirement. Keep the names and the custom icons.
 - If the Debug sender's permission row is stale, quit it, run
   `tccutil reset ScreenCapture com.peetzweg.opensidecar.mac.debug`, launch the
   unchanged app, use its Grant button, and restart it once.
