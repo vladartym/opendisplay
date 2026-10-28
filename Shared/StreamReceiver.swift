@@ -1590,6 +1590,9 @@ final class StreamReceiver: ObservableObject {
             self.connected = value
             if !value {
                 self.macProtocolVersion = WireProtocol.assumedWhenAbsent
+                // The size belongs to the session that sent it: kept, it made
+                // any later connection (a local port scan) count as streaming.
+                self.videoSize = .zero
             }
         }
         if !value { setStatus("Ready to connect") }
