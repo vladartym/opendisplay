@@ -72,6 +72,9 @@ final class KVM {
 
     private func refresh() {
         if tap == nil { installTap() }
+        // The owner keeps every screen of the other Mac: a session that ended
+        // (the other app restarted) connects again here.
+        if owner == .me, peerID != nil { connectPeerScreens() }
         if let homeBy { goHome(until: homeBy) }
         ReceiverController.shared.kvmVisible = owner.map { $0 == .peer }
         channel = receiverChannels.first?.sendKVM ?? senderChannels.first?.sendKVM
