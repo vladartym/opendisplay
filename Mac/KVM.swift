@@ -21,14 +21,14 @@ import AppKit
 // `defaults write com.peetzweg.opensidecar.mac.debug kvmOverWiFi -bool YES`
 // (or `-kvmOverWiFi YES`) allows WiFi too.
 @MainActor
-final class KVM {
+final class KVM: ObservableObject {
     static let shared = KVM()
 
     enum Owner: String { case me, peer }
 
     /// Who has the desk. Nil until the first switch: the app then works as
     /// it did before KVM.
-    private(set) var owner = UserDefaults.standard.string(forKey: "kvmOwner").flatMap(Owner.init) {
+    @Published private(set) var owner = UserDefaults.standard.string(forKey: "kvmOwner").flatMap(Owner.init) {
         didSet { UserDefaults.standard.set(owner?.rawValue, forKey: "kvmOwner") }
     }
     // The other Mac's install id and screen names, from its messages: the
@@ -36,7 +36,7 @@ final class KVM {
     private var peerID = UserDefaults.standard.string(forKey: "kvmPeer") {
         didSet { UserDefaults.standard.set(peerID, forKey: "kvmPeer") }
     }
-    private var peerScreens = UserDefaults.standard.stringArray(forKey: "kvmPeerScreens") ?? [] {
+    @Published private var peerScreens = UserDefaults.standard.stringArray(forKey: "kvmPeerScreens") ?? [] {
         didSet { UserDefaults.standard.set(peerScreens, forKey: "kvmPeerScreens") }
     }
 
@@ -110,6 +110,15 @@ final class KVM {
         message["you"] = you
         receiverChannels.forEach { $0.sendKVM(message) }
         senderChannels.forEach { $0.sendKVM(message) }
+    }
+
+    /// The other Mac's name: its main screen comes first.
+    var peerName: String? { peerScreens.first }
+
+    /// The panel's Activate button: give the desk to this Mac or to the other
+    /// Mac, the same switch as the hotkey.
+    func activate(thisMac: Bool) {
+        if thisMac == (owner == .peer) { toggle() }
     }
 
     /// ⌃⌥⌘K: give the desk to the other Mac, or take it back.

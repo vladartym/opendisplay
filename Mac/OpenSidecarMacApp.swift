@@ -1010,6 +1010,10 @@ struct ContentView: View {
     // Optional so the view still compiles/previews without an updater (e.g.
     // if Sparkle ever fails to start); the button just disables itself then.
     let updater: SPUStandardUpdaterController?
+    @ObservedObject private var kvm = KVM.shared
+    // The connection list, settings and permissions; the panel shows only
+    // the devices until the user asks for more.
+    @AppStorage("showMore") private var showMore = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1038,6 +1042,16 @@ struct ContentView: View {
             // Settings
             Form {
                 Section("Devices") {
+                    deviceRow(Host.current().localizedName ?? "This Mac", active: kvm.owner != .peer) {
+                        kvm.activate(thisMac: true)
+                    }
+                    if let peer = kvm.peerName {
+                        deviceRow(peer, active: kvm.owner == .peer) { kvm.activate(thisMac: false) }
+                    }
+                }
+
+                if showMore {
+                Section("Screens") {
                     if controller.deviceEntries.isEmpty {
                         Text("No devices found — plug one in via USB, or open the OpenDisplay app on a device on this WiFi network.")
                             .font(.caption)
@@ -1142,6 +1156,7 @@ struct ContentView: View {
                         anchor: "Privacy_LocalNetwork"
                     )
                 }
+                }
             }
             .formStyle(.grouped)
             // Scrollable + fixed panel height: MenuBarExtra windows mis-measure
@@ -1164,6 +1179,8 @@ struct ContentView: View {
                 // Support affordance: bug reports are much easier to act on
                 // with the log attached, and users shouldn't have to be told a
                 // filesystem path to find it.
+                Button(showMore ? "Less" : "More") { showMore.toggle() }
+                    .controlSize(.small)
                 Button("Logs") { Log.revealInFinder() }
                     .controlSize(.small)
                     .help("Reveal the OpenDisplay log files in Finder")
@@ -1176,7 +1193,25 @@ struct ContentView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
         }
-        .frame(width: 440, height: 540)
+        .frame(width: 440, height: showMore ? 540 : 250)
+    }
+
+    /// One computer of the desk: the active one has it, the other one can
+    /// take it.
+    private func deviceRow(_ name: String, active: Bool,
+                           activate: @escaping () -> Void) -> some View {
+        HStack {
+            Circle()
+                .fill(active ? Color.green : Color.secondary.opacity(0.5))
+                .frame(width: 9, height: 9)
+            Text(name)
+            Spacer()
+            if active {
+                Text("Active").foregroundStyle(.secondary)
+            } else {
+                Button("Activate", action: activate).controlSize(.small)
+            }
+        }
     }
 
     @ViewBuilder
