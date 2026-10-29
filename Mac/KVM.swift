@@ -55,6 +55,7 @@ final class KVM {
     // The desk came with the hotkey: put the pointer on the screen in front
     // of the user, the other Mac's main screen, once its display is up.
     private var homeBy: Date?
+    private var homeBounds: CGRect?
 
     private var allowsWiFi: Bool { UserDefaults.standard.bool(forKey: "kvmOverWiFi") }
 
@@ -149,7 +150,8 @@ final class KVM {
             if posted > 0 { Log.info("kvm: posted \(posted) events from the other Mac") }
             posted = 0
             owner = you == "own" ? .me : .peer
-            homeBy = owner == .me ? Date().addingTimeInterval(10) : nil
+            homeBy = owner == .me ? Date().addingTimeInterval(15) : nil
+            homeBounds = nil
             Log.info("kvm: the other Mac gave the desk to " + (owner == .me ? "this Mac" : "itself"))
             // Reply with this Mac's identity, so the other Mac can stream here
             // when it takes the desk.
@@ -164,16 +166,18 @@ final class KVM {
     }
 
     /// Warp the pointer to the middle of the display that streams to the
-    /// other Mac's main screen, once that display exists, for 10 s at most.
+    /// other Mac's main screen, for 15 s at most. A new display first moves
+    /// to its saved place, so wait until it stays put for one second.
     private func goHome(until deadline: Date) {
         let main = SenderController.shared.sessions.first { $0.deviceID == peerID && !$0.failed }
-        if let display = main?.sender.displayID {
-            let bounds = CGDisplayBounds(display)
+        let bounds = main?.sender.displayID.map(CGDisplayBounds)
+        if let bounds, bounds == homeBounds {
             CGWarpMouseCursorPosition(CGPoint(x: bounds.midX, y: bounds.midY))
             homeBy = nil
         } else if Date() > deadline {
             homeBy = nil
         }
+        homeBounds = bounds
     }
 
     // MARK: - This Mac's input to the owner
@@ -330,7 +334,7 @@ final class KVM {
         if count > 0 { return point }
         var display = CGDirectDisplayID()
         CGGetDisplaysWithPoint(from, 1, &display, &count)
-        guard count > 0 else { return from }
+        if count == 0 { display = CGMainDisplayID() }
         let bounds = CGDisplayBounds(display)
         return CGPoint(x: min(max(point.x, bounds.minX), bounds.maxX - 1),
                        y: min(max(point.y, bounds.minY), bounds.maxY - 1))
