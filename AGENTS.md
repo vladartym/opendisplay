@@ -11,10 +11,17 @@ requirement; changing either creates stale or duplicate permission entries.
   launch it with `./run.sh`. The script normalizes an ad hoc build's designated
   requirement before launch. Do not rebuild or re-sign it after granting Screen
   Recording during a test session.
-- On this Mac, the Debug apps are installed as `/Applications/OpenDisplay.app`
-  and `/Applications/OpenDisplay Receiver.app`, without "Dev". To install a
-  new build, copy its `Contents/MacOS` into the installed app, then re-sign
-  with the stable requirement. Keep the names and the custom icons.
+- On this Mac, the Debug app is installed as `/Applications/OpenDisplay.app`,
+  without "Dev". To install a new build, copy its `Contents/MacOS` into the
+  installed app, then re-sign with the stable requirement and
+  `Mac/OpenSidecarMac.entitlements`. Keep the name and the custom icon.
+- The sender app is one app: it also runs the receiver (one per screen) and
+  KVM (`Mac/KVM.swift`). Do not run the receiver app next to it on the same
+  Mac: both listen on port 9000. This Mac and the work Mac both run the one
+  app. Control-Option-Command-K on either Mac gives the desk (all screens, the
+  keyboard and the mouse) to the other Mac. The state is the defaults key
+  `kvmOwner` (`me` or `peer`), and KVM works only over the direct cable unless
+  `kvmOverWiFi` is YES.
 - If the Debug sender's permission row is stale, quit it, run
   `tccutil reset ScreenCapture com.peetzweg.opensidecar.mac.debug`, launch the
   unchanged app, use its Grant button, and restart it once.

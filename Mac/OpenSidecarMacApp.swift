@@ -515,7 +515,9 @@ final class SenderController: ObservableObject {
         let id = txtID(of: result)
         return sessions.contains { s in
             guard !s.failed else { return false }
-            if let id, s.deviceID == id { return true }
+            // With an id, only the id counts: each screen of a Mac has its
+            // own id, and every screen must connect.
+            if let id { return s.deviceID == id }
             return s.wired && s.deviceKind == "Mac"
         }
     }
