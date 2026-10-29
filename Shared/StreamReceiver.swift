@@ -270,10 +270,18 @@ final class StreamReceiver: ObservableObject {
         UserDefaults.standard.set(fresh, forKey: "installID")
         return fresh
     }()
+    /// The id this listener advertises. A Mac with several screens runs one
+    /// receiver per screen; each extra screen gets "<installID>.<screen>",
+    /// so the sender keeps them apart. Set before start().
+    var advertisedID = StreamReceiver.installID
+
+    /// KVM messages from the peer (one app on two Macs), with whether this
+    /// connection rides the direct cable. Called on the main thread.
+    static var onKVM: (([String: Any], Bool) -> Void)?
 
     private var advertisedService: NWListener.Service {
         var txt = NWTXTRecord()
-        txt["id"] = Self.installID
+        txt["id"] = advertisedID
         txt["pv"] = String(WireProtocol.version)   // issue #132
         return NWListener.Service(name: serviceName, type: "_opensidecar._tcp",
                                   domain: nil, txtRecord: txt)
@@ -886,6 +894,9 @@ final class StreamReceiver: ObservableObject {
             let height = obj["height"] as? Int ?? 0
             let fps = obj["framesPerSecond"] as? Int ?? 0
             Log.info("stream configuration: \(codec.uppercased()) \(width)x\(height) @\(fps)fps")
+        case "kvm":
+            let direct = connection.map(DirectCable.carries) ?? false
+            DispatchQueue.main.async { Self.onKVM?(obj, direct) }
         case WireMessage.power:
             let action = (obj["action"] as? String).flatMap(PowerAction.init(rawValue:))
             guard let action, powerActions.contains(action),
@@ -959,7 +970,7 @@ final class StreamReceiver: ObservableObject {
             "pixelsHigh": devicePixelsHigh,
             "scale": deviceScale,
             "device": deviceKind,
-            "id": Self.installID,
+            "id": advertisedID,
             "pv": WireProtocol.version,   // issue #132 — absent on old receivers
             "displayMaxFrameRate": displayMaxFrameRate,
         ]
@@ -1100,6 +1111,16 @@ final class StreamReceiver: ObservableObject {
     func sendProximity(entering: Bool, x: Double, y: Double) {
         sendControl(["type": "proximity", "entering": entering, "x": x, "y": y])
     }
+
+    /// A KVM message to the connected sender; `type` is set here.
+    func sendKVM(_ message: [String: Any]) {
+        var message = message
+        message["type"] = "kvm"
+        sendControl(message)
+    }
+
+    /// The live session rides the direct cable, judged from this side.
+    var onDirectCable: Bool { connected && (connection.map(DirectCable.carries) ?? false) }
 
     private func sendControl(_ message: [String: Any], on conn: NWConnection? = nil,
                              completion: (() -> Void)? = nil) {

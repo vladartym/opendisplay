@@ -58,6 +58,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // No power actions: the sender bundle has no Apple Events entitlement.
         ReceiverController.shared.powerActions = []
         ReceiverController.shared.start()
+        KVM.shared.start()
     }
 
     // Background/Dock modes: opening the app again (Spotlight, Finder, Dock
@@ -425,7 +426,7 @@ final class SenderController: ObservableObject {
                 connect(to: .usb(udid: device.udid))
             }
         }
-        guard wifiAutoConnectArmed, Date() < wifiAutoConnectDeadline else { return }
+        guard wifiAutoConnectArmed, Date() < wifiAutoConnectDeadline, mayGrabMacs else { return }
         for result in discovered {
             let target = ConnectionTarget.wifi(result)
             if wifiRemembered.contains(target.sessionID),
@@ -464,7 +465,7 @@ final class SenderController: ObservableObject {
         let plugged = nowOnCable.subtracting(onDirectCable)
         onDirectCable = nowOnCable
         everOnCable.formUnion(nowOnCable)
-        guard autoConnectEnabled, !plugged.isEmpty else { return }
+        guard autoConnectEnabled, !plugged.isEmpty, mayGrabMacs else { return }
         for result in discovered {
             guard let name = serviceName(of: result), plugged.contains(name),
                   !cableOptOut.contains(name),
@@ -474,6 +475,33 @@ final class SenderController: ObservableObject {
                   // own opt-out, never this one.
                   !usbDevices.contains(where: { sameDevice(result, $0) }) else { continue }
             Log.info("\(name) appeared on the direct cable — connecting")
+            connect(to: .wifi(result))
+        }
+    }
+
+    /// Two Macs that both run the one app see each other on the cable. Only
+    /// the KVM desk owner grabs the other Mac as its display; before the
+    /// first KVM switch, a Mac that already is another Mac's display does
+    /// not grab it back.
+    private var mayGrabMacs: Bool {
+        switch KVM.shared.owner {
+        case .me: return true
+        case .peer: return false
+        case nil: return !ReceiverController.shared.connected
+        }
+    }
+
+    /// KVM: this Mac took the desk, so it streams to every screen of the
+    /// other Mac that no session serves yet. The screens match by install id
+    /// ("<id>" or "<id>.<screen>"), or by name when the record has no TXT.
+    func connectScreens(of id: String?, names: [String]) {
+        for result in discovered {
+            let byID = txtID(of: result).map { txt in
+                id.map { txt == $0 || txt.hasPrefix($0 + ".") } ?? false
+            } ?? false
+            let byName = serviceName(of: result).map(names.contains) ?? false
+            guard byID || byName, activeSession(coveringWiFi: result) == nil else { continue }
+            Log.info("kvm: connecting to \(serviceName(of: result) ?? "a screen of the other Mac")")
             connect(to: .wifi(result))
         }
     }

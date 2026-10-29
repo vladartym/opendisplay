@@ -4,10 +4,15 @@
 // Mac. The pipeline is the shared StreamReceiver core; this file is only the
 // AppKit shell around it: lifecycle, the video window, cursor drawing, and
 // keeping the machine awake while it serves as a screen. It ships as its own
-// app (OpenSidecarMacReceiver target, macOS 12+) so old Macs can be displays.
+// app (OpenSidecarMacReceiver target, macOS 12+) so old Macs can be displays,
+// and inside the sender app, which then is one app for both roles.
 //
-// Display-only for now: the receiving Mac's keyboard/trackpad are not
-// forwarded to the sender (KVM-style input is a follow-up).
+// Each physical screen is its own receiver: one Bonjour service, port and
+// window per screen, so a sender can use every screen of this Mac. The main
+// screen keeps the install id, the plain name and port 9000.
+//
+// The one app also shows and hides the windows for KVM (Mac/KVM.swift),
+// through `kvmVisible`. The receiver app leaves it nil.
 
 import AppKit
 import AVFoundation
@@ -20,91 +25,54 @@ import SwiftUI
 final class ReceiverController: ObservableObject {
     static let shared = ReceiverController()
 
-    // A fresh StreamReceiver per activation: stop() tears the old one down
-    // and drops it, so listener/decoder state can't leak across mode flips.
-    // Nil whenever receiver mode is off.
+    // The main screen's receiver, for the panel. Nil whenever receiver mode
+    // is off.
     @Published private(set) var receiver: StreamReceiver?
     // Summaries for views that don't observe the receiver itself (menu bar
-    // icon, status bar): a sender is connected / frames are on screen.
+    // icon, status bar): a sender is connected / frames are on screen, on
+    // any screen.
     @Published private(set) var connected = false
     @Published private(set) var streaming = false
 
-    var active: Bool { receiver != nil }
+    var active: Bool { !screens.isEmpty }
 
-    private var window: NSWindow?
-    private var cancellables = Set<AnyCancellable>()
-    private var sleepActivity: NSObjectProtocol?
-    private var screenObserver: NSObjectProtocol?
-    private var screenSleepObservers: [NSObjectProtocol] = []
-    private let fullscreenPreference = FullscreenPreference()
-    private var windowObservers: [NSObjectProtocol] = []
-    private var windowCloseTimer: DispatchWorkItem?
+    /// One receiver per physical screen.
+    private(set) var screens: [ScreenReceiver] = []
 
-    private var fallbackName: String { Host.current().localizedName ?? "Mac" }
+    /// KVM (the one app only): nil shows each stream as the receiver app
+    /// does; true shows every stream over its whole screen; false hides them.
+    var kvmVisible: Bool? {
+        didSet { if kvmVisible != oldValue { screens.forEach { $0.kvmChanged() } } }
+    }
 
     /// What the receiver offers in hello; set before start().
     var powerActions = PowerControl.supported
+
+    let fullscreenPreference = FullscreenPreference()
+    private var sleepActivity: NSObjectProtocol?
+    private var screenObserver: NSObjectProtocol?
+    private var screenSleepObservers: [NSObjectProtocol] = []
+
+    private var fallbackName: String { Host.current().localizedName ?? "Mac" }
+    fileprivate var advertisedName: String {
+        let saved = UserDefaults.standard.string(forKey: "receiverName")
+        return (saved?.isEmpty == false) ? saved! : fallbackName
+    }
 
     /// Whether a Bonjour record is this Mac's own receiver. The install id
     /// matches only in the one app; the computer name also catches the
     /// separate receiver app running next to a sender on the same Mac.
     func isOwnService(id: String?, name: String?) -> Bool {
-        if let id, id == StreamReceiver.installID { return true }
+        let own = StreamReceiver.installID
+        if let id, id == own || id.hasPrefix(own + ".") { return true }
         guard let name else { return false }
-        return name == receiver?.serviceName || name == fallbackName
+        return screens.contains { $0.receiver.serviceName == name }
+            || name == fallbackName || name.hasPrefix(fallbackName + " (")
     }
 
     func start() {
-        guard receiver == nil else { return }
-        // Legacy senders understand only this rectangle; new senders also
-        // receive it as an H.264 capability and intersect it with their own
-        // codec constraints. 4096x2304 is the practical H.264 hardware-decode
-        // ceiling measured across Intel and Apple-silicon Macs, rather than an
-        // iMac-model exception.
-        //
-        // With a hardware HEVC decoder we also offer HEVC up to 5120x2880, so
-        // 4K and 5K panels can be sent 1:1 (the sender prefers HEVC). 5K is the
-        // largest raster measured live, on the oldest such Mac tested (a 2017
-        // Intel iMac); larger panels get a 5K stream scaled to fit.
-        //
-        // Both are landscape limits; `announcePanel` swaps them for a portrait
-        // panel (PROTOCOL.md 6.5), so a rotated 5K is not shrunk (#324).
-        let receiver = StreamReceiver(displayLayer: AVSampleBufferDisplayLayer(),
-                                      deviceKind: "Mac",
-                                      fallbackServiceName: fallbackName,
-                                      maxEncodeWide: Self.h264Limit.width,
-                                      maxEncodeHigh: Self.h264Limit.height,
-                                      hevcCapability: Self.hevcLimit.map {
-                                          VideoCapability(codec: "hevc", maxWidth: $0.width,
-                                                          maxHeight: $0.height, maxFrameRate: 60)
-                                      })
-        let saved = UserDefaults.standard.string(forKey: "receiverName")
-        receiver.serviceName = (saved?.isEmpty == false) ? saved! : fallbackName
-        announcePanel(to: receiver)
-        receiver.powerActions = powerActions
-        receiver.onPowerAction = { [weak self] action in self?.perform(action) }
-        self.receiver = receiver
-        receiver.start(port: 9000)
-
-        receiver.$connected
-            .removeDuplicates()
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] connected in
-                self?.connected = connected
-            }
-            .store(in: &cancellables)
-        // Streaming = connected and the video format is known — that's when
-        // the window has something to show (and when to take it down again).
-        receiver.$connected.combineLatest(receiver.$videoSize)
-            .map { $0 && $1 != .zero }
-            .removeDuplicates()
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] streaming in
-                self?.streaming = streaming
-                self?.updateSleepAssertion(streaming)
-                if streaming { self?.showWindow() } else { self?.scheduleCloseWindow() }
-            }
-            .store(in: &cancellables)
+        guard screens.isEmpty else { return }
+        syncScreens()
 
         // The receiving Mac's own panel went dark (idle sleep, lid) — nobody
         // can see the stream, so tell the sender exactly like a locked
@@ -116,56 +84,128 @@ final class ReceiverController: ObservableObject {
                                   object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in
                     Log.info("screens slept — announcing sleeping to the sender")
-                    self?.receiver?.enterSleep()
+                    self?.screens.forEach { $0.receiver.enterSleep() }
                 }
             },
             workspace.addObserver(forName: NSWorkspace.screensDidWakeNotification,
                                   object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.receiver?.ensureListening() }
+                Task { @MainActor in self?.screens.forEach { $0.receiver.ensureListening() } }
             },
         ]
 
         // Display-mode changes move the goalposts mid-session (the announced
         // panel is the sender's virtual-display size) — re-announce, the
-        // sender rebuilds. The Mac analogue of iPhone rotation.
+        // sender rebuilds. The Mac analogue of iPhone rotation. A screen
+        // plugged in or out gains or loses its receiver.
         screenObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
-                guard let self, let receiver = self.receiver else { return }
-                self.announcePanel(to: receiver)
+                guard let self, self.active else { return }
+                self.syncScreens()
             }
         }
-        Log.info("receiver mode started (advertising \"\(receiver.serviceName)\")")
+        Log.info("receiver mode started (advertising "
+                 + screens.map { "\"\($0.receiver.serviceName)\"" }.joined(separator: ", ") + ")")
     }
 
     /// Leave receiver mode. `completion` fires once "closing" has gone out
-    /// to a live sender (or a second has passed) — the quit path waits on it
-    /// so the sender ends its session instead of retrying a dead peer.
+    /// to every live sender (or a second has passed) — the quit path waits
+    /// on it so the sender ends its session instead of retrying a dead peer.
     func stop(completion: (() -> Void)? = nil) {
-        guard let receiver else { completion?(); return }
-        cancellables.removeAll()
-        windowCloseTimer?.cancel()
-        windowCloseTimer = nil
+        guard active else { completion?(); return }
         if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
         screenObserver = nil
         let workspace = NSWorkspace.shared.notificationCenter
         screenSleepObservers.forEach { workspace.removeObserver($0) }
         screenSleepObservers = []
-        receiver.stop(completion: completion)
-        self.receiver = nil
+        let group = DispatchGroup()
+        for screen in screens {
+            group.enter()
+            screen.stop { group.leave() }
+        }
+        group.notify(queue: .main) { completion?() }
+        screens = []
+        receiver = nil
         connected = false
         streaming = false
-        closeWindow()
         updateSleepAssertion(false)
         Log.info("receiver mode stopped")
+    }
+
+    /// Re-published name from the panel's text field. Empty falls back to the
+    /// computer name (mirrors the iOS Settings behavior).
+    func setAdvertisedName(_ name: String) {
+        UserDefaults.standard.set(name, forKey: "receiverName")
+        screens.forEach { $0.receiver.setServiceName($0.name(for: advertisedName)) }
+    }
+
+    /// Bring the video windows (back) up — the panel button for when the
+    /// user closed a window while the stream keeps running.
+    func showWindow() {
+        screens.forEach { $0.showWindow() }
+    }
+
+    /// One receiver per physical screen: a new screen gets one, a gone
+    /// screen's one stops, the others re-announce their panel.
+    private func syncScreens() {
+        let now = Self.physicalScreens()
+        for gone in screens where !now.contains(where: { $0.key == gone.key }) {
+            Log.info("screen \(gone.key) gone — stopping its receiver")
+            gone.stop(completion: nil)
+        }
+        screens.removeAll { unit in !now.contains { $0.key == unit.key } }
+        for (displayID, key) in now {
+            if let unit = screens.first(where: { $0.key == key }) {
+                unit.displayID = displayID
+                unit.announce()
+                continue
+            }
+            // The first screen keeps the identity a sender already knows.
+            let main = !screens.contains { $0.main }
+            var port: UInt16 = 9000
+            if !main {
+                port = 9002
+                while screens.contains(where: { $0.port == port }) { port += 2 }
+            }
+            let unit = ScreenReceiver(controller: self, key: key, displayID: displayID,
+                                      main: main, port: port)
+            screens.append(unit)
+            if main { receiver = unit.receiver }
+        }
+        if let first = screens.first(where: { $0.main }) ?? screens.first { receiver = first.receiver }
+        refresh()
+    }
+
+    /// Physical screens, the main one first: no virtual display this app made
+    /// for its own sender, no mirror. The key stays the same across replugs.
+    private static func physicalScreens() -> [(id: CGDirectDisplayID, key: String)] {
+        var result: [(id: CGDirectDisplayID, key: String)] = []
+        for screen in NSScreen.screens {
+            guard let id = screen.displayID,
+                  CGDisplayVendorNumber(id) != 0x5043,   // VirtualDisplay's vendor id
+                  CGDisplayMirrorsDisplay(id) == kCGNullDirectDisplay else { continue }
+            var key = "\(CGDisplayVendorNumber(id))-\(CGDisplayModelNumber(id))-\(CGDisplaySerialNumber(id))"
+            if result.contains(where: { $0.key == key }) { key += "-\(id)" }
+            result.append((id, key))
+        }
+        return result
+    }
+
+    /// Called by each screen when its connection or stream changes.
+    fileprivate func refresh() {
+        connected = screens.contains { $0.receiver.connected }
+        let nowStreaming = screens.contains { $0.streaming }
+        if nowStreaming != streaming {
+            streaming = nowStreaming
+            updateSleepAssertion(nowStreaming)
+        }
     }
 
     /// The sender asked this Mac to power off (PROTOCOL.md 6.6). Say
     /// "closing" first, so the sender ends the session instead of redialing
     /// a Mac that is going away.
-    private func perform(_ action: PowerAction) {
-        guard let receiver else { return }
+    fileprivate func perform(_ action: PowerAction, via receiver: StreamReceiver) {
         Log.info("power \(action.rawValue): saying goodbye to the sender")
         switch action {
         case .shutdown:
@@ -175,23 +215,134 @@ final class ReceiverController: ObservableObject {
                     // An app with unsaved changes can cancel the shutdown:
                     // take the listener back so this Mac is a display again.
                     DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self] in
-                        self?.receiver?.ensureListening()
+                        self?.screens.forEach { $0.receiver.ensureListening() }
                     }
                 }
             }
         }
     }
 
-    /// Re-published name from the panel's text field. Empty falls back to the
-    /// computer name (mirrors the iOS Settings behavior).
-    func setAdvertisedName(_ name: String) {
-        UserDefaults.standard.set(name, forKey: "receiverName")
-        receiver?.setServiceName(name)
+    // MARK: - Stay awake
+
+    /// This Mac *is* the display while a sender streams — never let it doze,
+    /// and wake it up when the stream starts. beginActivity only prevents
+    /// *future* idle sleep; a spare Mac with no keyboard has usually gone
+    /// dark by the time a sender connects, and frames into a black panel
+    /// looked like nothing worked at all. Declaring user activity is what
+    /// actually lights the display again.
+    private func updateSleepAssertion(_ receiving: Bool) {
+        if receiving, sleepActivity == nil {
+            var assertionID = IOPMAssertionID(0)
+            IOPMAssertionDeclareUserActivity(
+                "OpenDisplay stream started" as CFString,
+                kIOPMUserActiveLocal, &assertionID)
+            sleepActivity = ProcessInfo.processInfo.beginActivity(
+                options: [.idleDisplaySleepDisabled, .idleSystemSleepDisabled],
+                reason: "OpenDisplay is receiving a display stream")
+        } else if !receiving, let activity = sleepActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            sleepActivity = nil
+        }
+    }
+}
+
+// MARK: - One screen as a display
+
+/// One physical screen of this Mac as a display: its receiver (listener,
+/// Bonjour service, decoder) and its video window.
+@MainActor
+final class ScreenReceiver {
+    let key: String
+    let main: Bool
+    let port: UInt16
+    var displayID: CGDirectDisplayID
+    let receiver: StreamReceiver
+    private(set) var streaming = false
+
+    private unowned let controller: ReceiverController
+    private var window: NSWindow?
+    // The window is the borderless KVM one, not the normal one.
+    private var kvmWindow = false
+    private var cancellables = Set<AnyCancellable>()
+    private var windowObservers: [NSObjectProtocol] = []
+    private var windowCloseTimer: DispatchWorkItem?
+
+    var screen: NSScreen? { NSScreen.screens.first { $0.displayID == displayID } }
+
+    init(controller: ReceiverController, key: String, displayID: CGDirectDisplayID,
+         main: Bool, port: UInt16) {
+        self.controller = controller
+        self.key = key
+        self.displayID = displayID
+        self.main = main
+        self.port = port
+        // Legacy senders understand only this rectangle; new senders also
+        // receive it as an H.264 capability and intersect it with their own
+        // codec constraints. 4096x2304 is the practical H.264 hardware-decode
+        // ceiling measured across Intel and Apple-silicon Macs, rather than an
+        // iMac-model exception.
+        //
+        // With a hardware HEVC decoder we also offer HEVC up to 5120x2880, so
+        // 4K and 5K panels can be sent 1:1 (the sender prefers HEVC). 5K is the
+        // largest raster measured live, on the oldest such Mac tested (a 2017
+        // Intel iMac); larger panels get a 5K stream scaled to fit.
+        //
+        // Both are landscape limits; `announce` swaps them for a portrait
+        // panel (PROTOCOL.md 6.5), so a rotated 5K is not shrunk (#324).
+        receiver = StreamReceiver(displayLayer: AVSampleBufferDisplayLayer(),
+                                  deviceKind: "Mac",
+                                  fallbackServiceName: Host.current().localizedName ?? "Mac",
+                                  maxEncodeWide: Self.h264Limit.width,
+                                  maxEncodeHigh: Self.h264Limit.height,
+                                  hevcCapability: Self.hevcLimit.map {
+                                      VideoCapability(codec: "hevc", maxWidth: $0.width,
+                                                      maxHeight: $0.height, maxFrameRate: 60)
+                                  })
+        if !main { receiver.advertisedID = StreamReceiver.installID + "." + key }
+        receiver.serviceName = name(for: controller.advertisedName)
+        announce()
+        receiver.powerActions = controller.powerActions
+        receiver.onPowerAction = { [weak self] action in
+            guard let self else { return }
+            self.controller.perform(action, via: self.receiver)
+        }
+        receiver.start(port: port)
+
+        receiver.$connected
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.controller.refresh() }
+            .store(in: &cancellables)
+        // Streaming = connected and the video format is known — that's when
+        // the window has something to show (and when to take it down again).
+        receiver.$connected.combineLatest(receiver.$videoSize)
+            .map { $0 && $1 != .zero }
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] streaming in
+                guard let self else { return }
+                self.streaming = streaming
+                self.controller.refresh()
+                self.updateWindow()
+            }
+            .store(in: &cancellables)
     }
 
-    /// The panel this Mac offers as a display: the primary screen's current
-    /// framebuffer. A Retina panel announces its @2x pixels, which maps 1:1
-    /// onto the sender's @2x HiDPI virtual display.
+    /// The main screen advertises the plain name; another screen adds its
+    /// own name, so the sender's list tells them apart.
+    func name(for base: String) -> String {
+        main ? base : "\(base) (\(screen?.localizedName ?? key))"
+    }
+
+    func stop(completion: (() -> Void)?) {
+        cancellables.removeAll()
+        receiver.stop(completion: completion)
+        closeWindow()
+    }
+
+    /// The panel this screen offers as a display: its current framebuffer.
+    /// A Retina panel announces its @2x pixels, which maps 1:1 onto the
+    /// sender's @2x HiDPI virtual display.
     ///
     /// Minus the menu-bar/notch strip: native full screen never covers it on
     /// notched panels (the fullscreen window is the screen shrunk by
@@ -208,21 +359,19 @@ final class ReceiverController: ObservableObject {
     /// pixels of the native mode (minus the notch strip), the real backing
     /// scale, and the current "looks like" size, from which the sender
     /// decides the desktop (1x for a non-Retina panel, #344).
-    private func announcePanel(to receiver: StreamReceiver) {
-        guard let screen = NSScreen.screens.first else { return }
+    func announce() {
+        guard let screen else { return }
         let legacyScale = max(screen.backingScaleFactor, 2)
         let inset = screen.safeAreaInsets.top
         let height = screen.frame.height - inset
-        let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")]
-            as? CGDirectDisplayID
-        if let displayID, let mode = CGDisplayCopyDisplayMode(displayID), mode.refreshRate > 0 {
+        if let mode = CGDisplayCopyDisplayMode(displayID), mode.refreshRate > 0 {
             receiver.setDisplayMaxFrameRate(Int(mode.refreshRate.rounded()))
         } else {
             receiver.setDisplayMaxFrameRate(60)
         }
 
         let portrait = screen.frame.height > screen.frame.width
-        let native = displayID.flatMap(Self.nativePixels(of:))
+        let native = Self.nativePixels(of: displayID)
             ?? PanelSize(width: Int(screen.frame.width * screen.backingScaleFactor),
                          height: Int(screen.frame.height * screen.backingScaleFactor))
         // A rotated display reports a rotated frame; orient the native mode
@@ -253,7 +402,7 @@ final class ReceiverController: ObservableObject {
                           panel: panel, limitsChanged: limitsChanged)
     }
 
-    /// Landscape decode limits; see `start`.
+    /// Landscape decode limits; see `init`.
     private static let h264Limit = PanelSize(width: 4096, height: 2304)
     private static let hevcLimit: PanelSize? = VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC)
         ? PanelSize(width: 5120, height: 2880) : nil
@@ -281,12 +430,32 @@ final class ReceiverController: ObservableObject {
 
     // MARK: - Video window
 
-    /// Bring the video window (back) up — also bound to the panel button for
-    /// when the user closed the window while the stream keeps running.
+    /// Show, hide or take down the window for the stream and the KVM state.
+    func updateWindow() {
+        guard streaming else { scheduleCloseWindow(); return }
+        if controller.kvmVisible == false {
+            window?.orderOut(nil)
+        } else {
+            showWindow()
+        }
+    }
+
+    /// The KVM window and the normal window are different kinds: switching
+    /// between KVM and no KVM builds the window again.
+    func kvmChanged() {
+        if window != nil, kvmWindow != (controller.kvmVisible != nil) { closeWindow() }
+        updateWindow()
+    }
+
+    /// Bring the video window (back) up.
     func showWindow() {
-        guard let receiver, streaming || window != nil else { return }
+        guard streaming || window != nil, controller.kvmVisible != false else { return }
         windowCloseTimer?.cancel()
         windowCloseTimer = nil
+        if controller.kvmVisible == true {
+            showKVMWindow()
+            return
+        }
         var created = false
         if window == nil {
             let w = NSWindow(contentRect: initialContentRect(video: receiver.videoSize),
@@ -296,8 +465,15 @@ final class ReceiverController: ObservableObject {
             w.contentView = ReceiverVideoView(receiver: receiver)
             w.isReleasedWhenClosed = false
             w.collectionBehavior.insert(.fullScreenPrimary)
-            w.center()
+            // On this screen, so full screen also opens on it.
+            if let frame = screen?.visibleFrame {
+                w.setFrameOrigin(NSPoint(x: frame.midX - w.frame.width / 2,
+                                         y: frame.midY - w.frame.height / 2))
+            } else {
+                w.center()
+            }
             window = w
+            kvmWindow = false
             observeFullscreenChoice(of: w)
             created = true
         }
@@ -309,9 +485,35 @@ final class ReceiverController: ObservableObject {
         // Only a freshly built window takes the preference: an existing one
         // is already where the user put it, and toggling it mid-animation
         // would undo the transition.
-        if created, fullscreenPreference.wantsFullscreen, let window {
+        if created, controller.fullscreenPreference.wantsFullscreen, let window {
             window.toggleFullScreen(nil)
         }
+    }
+
+    /// KVM: a borderless window over the whole screen, above the menu bar,
+    /// so a switch shows or hides it at once, with no full screen animation.
+    private func showKVMWindow() {
+        guard let screen else { return }
+        if window == nil {
+            let w = KVMWindow(contentRect: screen.frame, styleMask: .borderless,
+                              backing: .buffered, defer: false)
+            w.level = NSWindow.Level(rawValue: Int(CGShieldingWindowLevel()))
+            w.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+            w.backgroundColor = .black
+            w.isReleasedWhenClosed = false
+            let container = NSView(frame: NSRect(origin: .zero, size: screen.frame.size))
+            // The stream fills the screen below the notch strip (see announce).
+            let video = ReceiverVideoView(receiver: receiver)
+            video.frame = NSRect(x: 0, y: 0, width: screen.frame.width,
+                                 height: screen.frame.height - screen.safeAreaInsets.top)
+            video.autoresizingMask = [.width, .height]
+            container.addSubview(video)
+            w.contentView = container
+            window = w
+            kvmWindow = true
+        }
+        window?.setFrame(screen.frame, display: true)
+        window?.orderFrontRegardless()
     }
 
     /// The stream stopped. A sender moving the session to a better transport
@@ -341,7 +543,7 @@ final class ReceiverController: ObservableObject {
     /// the panel's button then builds a fresh one with the preference.
     private func observeFullscreenChoice(of window: NSWindow) {
         let center = NotificationCenter.default
-        let observe = { (name: Notification.Name, apply: @escaping @MainActor (ReceiverController) -> Void) in
+        let observe = { (name: Notification.Name, apply: @escaping @MainActor (ScreenReceiver) -> Void) in
             // Synchronous on .main: a close must stop observing before the
             // fullscreen exit it causes is delivered.
             center.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
@@ -349,8 +551,12 @@ final class ReceiverController: ObservableObject {
             }
         }
         windowObservers = [
-            observe(NSWindow.didEnterFullScreenNotification) { $0.fullscreenPreference.wantsFullscreen = true },
-            observe(NSWindow.didExitFullScreenNotification) { $0.fullscreenPreference.wantsFullscreen = false },
+            observe(NSWindow.didEnterFullScreenNotification) {
+                $0.controller.fullscreenPreference.wantsFullscreen = true
+            },
+            observe(NSWindow.didExitFullScreenNotification) {
+                $0.controller.fullscreenPreference.wantsFullscreen = false
+            },
             observe(NSWindow.willCloseNotification) {
                 $0.stopObservingWindow()
                 $0.window = nil
@@ -366,36 +572,24 @@ final class ReceiverController: ObservableObject {
     /// Windowed at ~70% of the screen; fullscreen returns here when the user
     /// leaves it.
     private func initialContentRect(video: CGSize) -> NSRect {
-        let visible = NSScreen.screens.first?.visibleFrame.size
-            ?? CGSize(width: 1440, height: 900)
+        let visible = screen?.visibleFrame.size ?? CGSize(width: 1440, height: 900)
         let size = video == .zero ? CGSize(width: 960, height: 600) : video
         let scale = min(0.7 * visible.width / size.width,
                         0.7 * visible.height / size.height, 1)
         return NSRect(x: 0, y: 0,
                       width: size.width * scale, height: size.height * scale)
     }
+}
 
-    // MARK: - Stay awake
+/// A borderless window can't become key by default; the KVM window must, so
+/// its blank cursor applies.
+private final class KVMWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+}
 
-    /// This Mac *is* the display while a sender streams — never let it doze,
-    /// and wake it up when the stream starts. beginActivity only prevents
-    /// *future* idle sleep; a spare Mac with no keyboard has usually gone
-    /// dark by the time a sender connects, and frames into a black panel
-    /// looked like nothing worked at all. Declaring user activity is what
-    /// actually lights the display again.
-    private func updateSleepAssertion(_ receiving: Bool) {
-        if receiving, sleepActivity == nil {
-            var assertionID = IOPMAssertionID(0)
-            IOPMAssertionDeclareUserActivity(
-                "OpenDisplay stream started" as CFString,
-                kIOPMUserActiveLocal, &assertionID)
-            sleepActivity = ProcessInfo.processInfo.beginActivity(
-                options: [.idleDisplaySleepDisabled, .idleSystemSleepDisabled],
-                reason: "OpenDisplay is receiving a display stream")
-        } else if !receiving, let activity = sleepActivity {
-            ProcessInfo.processInfo.endActivity(activity)
-            sleepActivity = nil
-        }
+extension NSScreen {
+    var displayID: CGDirectDisplayID? {
+        deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
     }
 }
 

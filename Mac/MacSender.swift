@@ -1801,13 +1801,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         probeRoundGeneration += 1
         let round = probeRoundGeneration
         probeOutcomes = []
+        // The receiver's own port: a Mac with several screens listens on one
+        // port per screen, so a probe to 9000 would reach the wrong screen.
+        var port: NWEndpoint.Port = 9000
+        if case .hostPort(_, let live)? = connection?.currentPath?.remoteEndpoint { port = live }
 
         for host in candidates.prefix(16) {
             let tcp = NWProtocolTCP.Options()
             tcp.noDelay = true
             let params = NWParameters(tls: nil, tcp: tcp)
             params.prohibitedInterfaceTypes = [.wifi, .cellular]
-            let probe = NWConnection(host: host, port: 9000, using: params)
+            let probe = NWConnection(host: host, port: port, using: params)
             upgradeProbes.append(probe)
             probe.stateUpdateHandler = { [weak self] state in
                 guard let self, self.upgradeProbes.contains(where: { $0 === probe }) else { return }
@@ -2537,6 +2541,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     }
                 }
             }
+        case "kvm":
+            let direct = connection.map(DirectCable.carries) ?? false
+            Task { @MainActor in Self.onKVM?(obj, direct) }
         case "touch":
             if let phase = obj["phase"] as? String,
                let x = obj["x"] as? Double,
@@ -3209,6 +3216,25 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private func sendJSONFrame(_ json: String) {
         guard let connection, connectionReady else { return }
         sendJSONFrame(json, on: connection)
+    }
+
+    /// KVM messages from the peer's receiver (one app on two Macs), with
+    /// whether this connection rides the direct cable.
+    @MainActor static var onKVM: (([String: Any], Bool) -> Void)?
+
+    /// A KVM message to the receiver; `type` is set here.
+    func sendKVM(_ message: [String: Any]) {
+        var message = message
+        message["type"] = "kvm"
+        guard let data = try? JSONSerialization.data(withJSONObject: message),
+              let json = String(data: data, encoding: .utf8) else { return }
+        queue.async { self.sendJSONFrame(json) }
+    }
+
+    /// The live connection rides the direct cable.
+    var onDirectCable: Bool {
+        guard connectionReady, let connection else { return false }
+        return DirectCable.carries(connection)
     }
 
     /// Send on a connection whose `.ready` callback is currently being
