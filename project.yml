@@ -47,6 +47,12 @@ targets:
     sources:
       - Mac
       - Shared
+      # One app: the sender also runs the receiver, so a Mac can be a display
+      # and use displays. The receiver app target stays for macOS 12 and 13.
+      - MacReceiver/MacReceiver.swift
+      - MacReceiver/ReceiverPanel.swift
+      - MacReceiver/PowerControl.swift
+      - MacReceiver/FullscreenPreference.swift
     dependencies:
       - package: Sparkle
     info:

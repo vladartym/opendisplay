@@ -42,6 +42,18 @@ final class ReceiverController: ObservableObject {
 
     private var fallbackName: String { Host.current().localizedName ?? "Mac" }
 
+    /// What the receiver offers in hello; set before start().
+    var powerActions = PowerControl.supported
+
+    /// Whether a Bonjour record is this Mac's own receiver. The install id
+    /// matches only in the one app; the computer name also catches the
+    /// separate receiver app running next to a sender on the same Mac.
+    func isOwnService(id: String?, name: String?) -> Bool {
+        if let id, id == StreamReceiver.installID { return true }
+        guard let name else { return false }
+        return name == receiver?.serviceName || name == fallbackName
+    }
+
     func start() {
         guard receiver == nil else { return }
         // Legacy senders understand only this rectangle; new senders also
@@ -69,7 +81,7 @@ final class ReceiverController: ObservableObject {
         let saved = UserDefaults.standard.string(forKey: "receiverName")
         receiver.serviceName = (saved?.isEmpty == false) ? saved! : fallbackName
         announcePanel(to: receiver)
-        receiver.powerActions = PowerControl.supported
+        receiver.powerActions = powerActions
         receiver.onPowerAction = { [weak self] action in self?.perform(action) }
         self.receiver = receiver
         receiver.start(port: 9000)

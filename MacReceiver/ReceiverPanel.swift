@@ -6,6 +6,8 @@ import SwiftUI
 /// name, and how-to copy. Lives inside the shared grouped Form.
 struct ReceiverSections: View {
     @ObservedObject var controller: ReceiverController
+    /// False inside the sender's panel: status and name only.
+    var full = true
     @AppStorage("showAnalytics") private var showAnalytics = false
 
     var body: some View {
@@ -23,6 +25,13 @@ struct ReceiverSections: View {
             Text("How this Mac appears in the other Mac's Devices list.")
         }
 
+        if full {
+            optionalSections
+        }
+    }
+
+    @ViewBuilder
+    private var optionalSections: some View {
         Section {
             Toggle("Performance overlay", isOn: $showAnalytics)
         } footer: {

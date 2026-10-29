@@ -54,6 +54,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if presentation != .menuBar {
             MainWindow.show()
         }
+        // One app, both roles: this Mac is also a display for another Mac.
+        // No power actions: the sender bundle has no Apple Events entitlement.
+        ReceiverController.shared.powerActions = []
+        ReceiverController.shared.start()
     }
 
     // Background/Dock modes: opening the app again (Spotlight, Finder, Dock
@@ -62,6 +66,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                        hasVisibleWindows: Bool) -> Bool {
         MainWindow.show()
         return false
+    }
+
+    // Quitting while being a display: tell the sender we're closing, as the
+    // receiver app does.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard ReceiverController.shared.active else { return .terminateNow }
+        ReceiverController.shared.stop {
+            DispatchQueue.main.async { NSApp.reply(toApplicationShouldTerminate: true) }
+        }
+        return .terminateLater
     }
 }
 
@@ -317,7 +331,13 @@ final class SenderController: ObservableObject {
         browser.browseResultsChangedHandler = { [weak self] results, _ in
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.discovered = Array(results)
+                // This Mac's own receiver never reaches the device list or any
+                // auto-connect path: dialing it loops (each dial resets the
+                // last one).
+                self.discovered = results.filter {
+                    !ReceiverController.shared.isOwnService(id: self.txtID(of: $0),
+                                                            name: self.serviceName(of: $0))
+                }
                 self.endSessionsWhoseServiceVanished()
                 self.autoConnect()
                 self.connectNewlyCabled()
@@ -1064,6 +1084,8 @@ struct ContentView: View {
                     .controlSize(.small)
                 }
                 .help("Opens System Settings → Displays, where you can position the extended displays relative to your Mac screen (Arrange…). Each device shows up as its own display, named after the device.")
+
+                ReceiverSections(controller: ReceiverController.shared, full: false)
 
                 Section("Permissions") {
                     permissionRow(
