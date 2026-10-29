@@ -19,7 +19,7 @@ struct CaptureSourceCheck {
     /// delivering some other rect for longer than `tolerance`; the caller
     /// then re-attaches capture and should start a fresh check.
     mutating func frame(screenRect: CGRect, expected: CGRect, now: Date = Date()) -> Bool {
-        guard !screenRect.isEmpty, !expected.isEmpty, screenRect != expected else {
+        guard !screenRect.isEmpty, !expected.isEmpty, !Self.same(screenRect, expected) else {
             mismatchSince = nil
             return false
         }
@@ -30,5 +30,12 @@ struct CaptureSourceCheck {
         guard now.timeIntervalSince(since) >= Self.tolerance else { return false }
         mismatchSince = nil
         return true
+    }
+
+    /// Equal to half a point: SCK can report 1800.0000000000002 for a
+    /// display that is 1800 wide, and that is the same display.
+    private static func same(_ a: CGRect, _ b: CGRect) -> Bool {
+        abs(a.minX - b.minX) < 0.5 && abs(a.minY - b.minY) < 0.5
+            && abs(a.width - b.width) < 0.5 && abs(a.height - b.height) < 0.5
     }
 }

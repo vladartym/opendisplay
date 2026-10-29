@@ -35,6 +35,17 @@ final class CaptureSourceCheckTests: XCTestCase {
         XCTAssertFalse(check.frame(screenRect: iMac, expected: resized, now: t0 + 2))
     }
 
+    /// A rounding error in the frame's rect is the same display.
+    func testRoundingErrorDoesNotTrip() {
+        var check = CaptureSourceCheck()
+        let own = CGRect(x: 4_288, y: 0, width: 1_800, height: 1_130)
+        let frame = CGRect(x: 4_288, y: 0, width: 1_800.000_000_000_000_2, height: 1_130)
+
+        for second in 0..<5 {
+            XCTAssertFalse(check.frame(screenRect: frame, expected: own, now: t0 + Double(second)))
+        }
+    }
+
     func testEmptyRectsAreIgnored() {
         var check = CaptureSourceCheck()
 
