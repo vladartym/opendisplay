@@ -49,6 +49,12 @@ final class KVM {
     private let source = CGEventSource(stateID: .hidSystemState)
     private var buttonsDown: Set<Int64> = []
     private var loggedOffCable = false
+    // Events this Mac sent while capturing, and posted for the other Mac.
+    private var sent = 0
+    private var posted = 0
+    // The desk came with the hotkey: put the pointer on the screen in front
+    // of the user, the other Mac's main screen, once its display is up.
+    private var homeBy: Date?
 
     private var allowsWiFi: Bool { UserDefaults.standard.bool(forKey: "kvmOverWiFi") }
 
@@ -65,6 +71,7 @@ final class KVM {
 
     private func refresh() {
         if tap == nil { installTap() }
+        if let homeBy { goHome(until: homeBy) }
         ReceiverController.shared.kvmVisible = owner.map { $0 == .peer }
         channel = receiverChannels.first?.sendKVM ?? senderChannels.first?.sendKVM
         // Catch the input only while the owner's screens show here and a
@@ -139,7 +146,10 @@ final class KVM {
             peerScreens = message["screens"] as? [String] ?? peerScreens
         }
         if let you = message["you"] as? String {
+            if posted > 0 { Log.info("kvm: posted \(posted) events from the other Mac") }
+            posted = 0
             owner = you == "own" ? .me : .peer
+            homeBy = owner == .me ? Date().addingTimeInterval(10) : nil
             Log.info("kvm: the other Mac gave the desk to " + (owner == .me ? "this Mac" : "itself"))
             // Reply with this Mac's identity, so the other Mac can stream here
             // when it takes the desk.
@@ -148,7 +158,21 @@ final class KVM {
             if owner == .me { connectPeerScreens() }
             refresh()
         } else if message["e"] != nil, owner == .me {
+            posted += 1
             inject(message)
+        }
+    }
+
+    /// Warp the pointer to the middle of the display that streams to the
+    /// other Mac's main screen, once that display exists, for 10 s at most.
+    private func goHome(until deadline: Date) {
+        let main = SenderController.shared.sessions.first { $0.deviceID == peerID && !$0.failed }
+        if let display = main?.sender.displayID {
+            let bounds = CGDisplayBounds(display)
+            CGWarpMouseCursorPosition(CGPoint(x: bounds.midX, y: bounds.midY))
+            homeBy = nil
+        } else if Date() > deadline {
+            homeBy = nil
         }
     }
 
@@ -175,7 +199,11 @@ final class KVM {
     }
 
     private func setCapturing(_ on: Bool) {
-        if !on { channel?(["e": "release"]) }
+        if !on {
+            channel?(["e": "release"])
+            Log.info("kvm: sent \(sent) events to the other Mac")
+        }
+        sent = 0
         capturing = on
         // The pointer stays still here; its moves go to the owner.
         CGAssociateMouseAndMouseCursorPosition(on ? 0 : 1)
@@ -204,6 +232,7 @@ final class KVM {
             return nil
         }
         guard capturing, let channel else { return event }
+        sent += 1
         switch type {
         case .keyDown, .keyUp:
             channel(["e": "key", "code": field(.keyboardEventKeycode), "down": type == .keyDown,

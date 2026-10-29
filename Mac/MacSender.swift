@@ -3231,6 +3231,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         queue.async { self.sendJSONFrame(json) }
     }
 
+    /// The virtual display this session streams, once it exists.
+    var displayID: CGDirectDisplayID? { virtualDisplay?.displayID }
+
     /// The live connection rides the direct cable.
     var onDirectCable: Bool {
         guard connectionReady, let connection else { return false }
