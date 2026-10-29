@@ -668,8 +668,12 @@ final class StreamReceiver: ObservableObject {
                             return
                         }
                         self.pendingConnections.removeAll { $0 === conn }
-                        if let data, !data.isEmpty {
+                        if let data, !data.isEmpty, WireProtocol.startsFrame(data) {
                             self.adopt(conn, greeted: true, initialData: data)
+                        } else if let data, !data.isEmpty {
+                            // A port check, not a sender: the session stays.
+                            Log.info("ignored a newcomer that sent no frame")
+                            conn.cancel()
                         } else {
                             Log.info("ignored a twin connection that closed at once"
                                      + (error.map { " (\($0))" } ?? ""))

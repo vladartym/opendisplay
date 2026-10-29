@@ -24,6 +24,16 @@ enum WireProtocol {
 
     /// A peer that advertises no `pv` is defined as protocol 1.
     static let assumedWhenAbsent = 1
+
+    /// Whether the first bytes from a newcomer can start a frame (PROTOCOL.md
+    /// 3): a length prefix of 1 byte to 256 MB. A web check that connects to
+    /// the port sends "GET ", which reads as about 1.2 GB. Fewer than 4 bytes
+    /// cannot be judged and pass.
+    static func startsFrame(_ data: Data) -> Bool {
+        guard data.count >= 4 else { return true }
+        let length = data.prefix(4).reduce(UInt32(0)) { $0 << 8 | UInt32($1) }
+        return length > 0 && length < 1 << 28
+    }
 }
 
 /// Control-message `type` strings introduced with the handshake. The pre-
