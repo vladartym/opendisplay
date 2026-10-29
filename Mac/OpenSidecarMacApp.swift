@@ -1030,7 +1030,7 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                if controller.running {
+                if controller.running, showMore {
                     Button("Disconnect All") { controller.disconnectAll() }
                         .controlSize(.large)
                 }
@@ -1193,7 +1193,7 @@ struct ContentView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
         }
-        .frame(width: 440, height: showMore ? 540 : 250)
+        .frame(width: 440, height: showMore ? 540 : 290)
     }
 
     /// One computer of the desk: the active one has it, the other one can
